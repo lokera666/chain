@@ -1,19 +1,21 @@
 package keeper
 
 import (
-	"errors"
+	"fmt"
 	"io"
 
-	snapshot "github.com/cosmos/cosmos-sdk/snapshots/types"
-	sdk "github.com/cosmos/cosmos-sdk/types"
-	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
-	protoio "github.com/gogo/protobuf/io"
-	"github.com/tendermint/tendermint/libs/log"
-	tmproto "github.com/tendermint/tendermint/proto/tendermint/types"
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
 
-	"github.com/bandprotocol/chain/v2/pkg/filecache"
-	"github.com/bandprotocol/chain/v2/pkg/gzip"
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
+	errorsmod "cosmossdk.io/errors"
+	"cosmossdk.io/log"
+	snapshot "cosmossdk.io/store/snapshots/types"
+	storetypes "cosmossdk.io/store/types"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
+
+	"github.com/bandprotocol/chain/v3/pkg/filecache"
+	"github.com/bandprotocol/chain/v3/pkg/gzip"
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
 var _ snapshot.ExtensionSnapshotter = &OracleSnapshotter{}
@@ -23,10 +25,10 @@ const SnapshotFormat = 1
 
 type OracleSnapshotter struct {
 	keeper *Keeper
-	cms    sdk.MultiStore
+	cms    storetypes.MultiStore
 }
 
-func NewOracleSnapshotter(cms sdk.MultiStore, keeper *Keeper) *OracleSnapshotter {
+func NewOracleSnapshotter(cms storetypes.MultiStore, keeper *Keeper) *OracleSnapshotter {
 	return &OracleSnapshotter{
 		keeper: keeper,
 		cms:    cms,
@@ -45,19 +47,19 @@ func (os *OracleSnapshotter) SupportedFormats() []uint32 {
 	return []uint32{SnapshotFormat}
 }
 
-func (os *OracleSnapshotter) Snapshot(height uint64, protoWriter protoio.Writer) error {
+func (os *OracleSnapshotter) SnapshotExtension(height uint64, payloadWriter snapshot.ExtensionPayloadWriter) error {
 	cacheMS, err := os.cms.CacheMultiStoreWithVersion(int64(height))
 	if err != nil {
 		return err
 	}
 
-	ctx := sdk.NewContext(cacheMS, tmproto.Header{}, false, log.NewNopLogger())
+	ctx := sdk.NewContext(cacheMS, cmtproto.Header{}, false, log.NewNopLogger())
 	seenBefore := make(map[string]bool)
 
 	// write all oracle scripts to snapshot
 	oracleScripts := os.keeper.GetAllOracleScripts(ctx)
 	for _, oracleScript := range oracleScripts {
-		if err := writeFileToSnapshot(protoWriter, oracleScript.Filename, os.keeper, seenBefore); err != nil {
+		if err := writeFileToSnapshot(payloadWriter, oracleScript.Filename, os.keeper, seenBefore); err != nil {
 			return err
 		}
 	}
@@ -65,7 +67,7 @@ func (os *OracleSnapshotter) Snapshot(height uint64, protoWriter protoio.Writer)
 	// write all data sources to snapshot
 	dataSources := os.keeper.GetAllDataSources(ctx)
 	for _, dataSource := range dataSources {
-		if err := writeFileToSnapshot(protoWriter, dataSource.Filename, os.keeper, seenBefore); err != nil {
+		if err := writeFileToSnapshot(payloadWriter, dataSource.Filename, os.keeper, seenBefore); err != nil {
 			return err
 		}
 	}
@@ -73,22 +75,30 @@ func (os *OracleSnapshotter) Snapshot(height uint64, protoWriter protoio.Writer)
 	return nil
 }
 
-func (os *OracleSnapshotter) Restore(
-	height uint64, format uint32, protoReader protoio.Reader,
-) (snapshot.SnapshotItem, error) {
+// No need to do anything
+func (os *OracleSnapshotter) PruneSnapshotHeight(height int64) {
+}
+
+// No need to do anything
+func (os *OracleSnapshotter) SetSnapshotInterval(snapshotInterval uint64) {
+}
+
+func (os *OracleSnapshotter) RestoreExtension(
+	height uint64, format uint32, payloadReader snapshot.ExtensionPayloadReader,
+) error {
 	if format == SnapshotFormat {
-		return os.processAllItems(height, protoReader, restoreV1, finalizeV1)
+		return os.processAllItems(height, payloadReader, restoreV1, finalizeV1)
 	}
-	return snapshot.SnapshotItem{}, snapshot.ErrUnknownFormat
+	return snapshot.ErrUnknownFormat
 }
 
 func (os *OracleSnapshotter) processAllItems(
 	height uint64,
-	protoReader protoio.Reader,
+	payloadReader snapshot.ExtensionPayloadReader,
 	restore func(sdk.Context, *Keeper, []byte, map[string]bool) error,
 	finalize func(sdk.Context, *Keeper, map[string]bool) error,
-) (snapshot.SnapshotItem, error) {
-	ctx := sdk.NewContext(os.cms, tmproto.Header{Height: int64(height)}, false, log.NewNopLogger())
+) error {
+	ctx := sdk.NewContext(os.cms, cmtproto.Header{Height: int64(height)}, false, log.NewNopLogger())
 
 	// get all filename that we need to find and construct a map to store found status
 	foundCode := make(map[string]bool)
@@ -101,32 +111,24 @@ func (os *OracleSnapshotter) processAllItems(
 		foundCode[dataSource.Filename] = false
 	}
 
-	// keep the last snapshot item that is not for our module and return it for snapshot manager to handle.
-	var item snapshot.SnapshotItem
 	for {
-		item = snapshot.SnapshotItem{}
-		err := protoReader.ReadMsg(&item)
+		payload, err := payloadReader()
 		if err == io.EOF {
 			break
 		} else if err != nil {
-			return snapshot.SnapshotItem{}, sdkerrors.Wrap(err, "invalid protobuf message")
+			return errorsmod.Wrap(err, "invalid protobuf message")
 		}
 
-		payload := item.GetExtensionPayload()
-		if payload == nil {
-			break
-		}
-
-		if err := restore(ctx, os.keeper, payload.Payload, foundCode); err != nil {
-			return snapshot.SnapshotItem{}, sdkerrors.Wrap(err, "processing snapshot item")
+		if err := restore(ctx, os.keeper, payload, foundCode); err != nil {
+			return errorsmod.Wrap(err, "processing snapshot item")
 		}
 	}
 
-	return item, finalize(ctx, os.keeper, foundCode)
+	return finalize(ctx, os.keeper, foundCode)
 }
 
 func writeFileToSnapshot(
-	protoWriter protoio.Writer,
+	payloadWriter snapshot.ExtensionPayloadWriter,
 	filename string,
 	k *Keeper,
 	seenBefore map[string]bool,
@@ -150,7 +152,7 @@ func writeFileToSnapshot(
 	}
 
 	// write it to snapshot
-	if err = snapshot.WriteExtensionItem(protoWriter, compressBytes); err != nil {
+	if err = payloadWriter(compressBytes); err != nil {
 		return err
 	}
 
@@ -164,7 +166,7 @@ func restoreV1(ctx sdk.Context, k *Keeper, compressedCode []byte, foundCode map[
 		max(types.MaxExecutableSize, types.MaxWasmCodeSize, types.MaxCompiledWasmCodeSize),
 	)
 	if err != nil {
-		return sdkerrors.Wrapf(types.ErrUncompressionFailed, err.Error())
+		return types.ErrUncompressionFailed.Wrap(err.Error())
 	}
 
 	// check if we really need this file or not first
@@ -172,7 +174,7 @@ func restoreV1(ctx sdk.Context, k *Keeper, compressedCode []byte, foundCode map[
 	found, required := foundCode[filename]
 
 	if !required {
-		return errors.New("found unexpected code in the snapshot")
+		return fmt.Errorf("found unexpected code in the snapshot")
 	}
 
 	if !found {
@@ -188,7 +190,7 @@ func finalizeV1(ctx sdk.Context, k *Keeper, foundCode map[string]bool) error {
 	// check if there is any required code that we can't find in restore process
 	for _, found := range foundCode {
 		if !found {
-			return errors.New("some code is missing from the snapshot")
+			return fmt.Errorf("some code is missing from the snapshot")
 		}
 	}
 	return nil

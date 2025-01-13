@@ -1,10 +1,13 @@
 package keeper
 
 import (
-	sdk "github.com/cosmos/cosmos-sdk/types"
-	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
+	dbm "github.com/cosmos/cosmos-db"
 
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
+	storetypes "cosmossdk.io/store/types"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
+
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
 // HasReport checks if the report of this ID triple exists in the storage.
@@ -19,58 +22,65 @@ func (k Keeper) SetReport(ctx sdk.Context, rid types.RequestID, rep types.Report
 	ctx.KVStore(k.storeKey).Set(key, k.cdc.MustMarshal(&rep))
 }
 
-// AddReports performs sanity checks and adds a new batch from one validator to one request
+// AddReport performs sanity checks and adds a new batch from one validator to one request
 // to the store. Note that we expect each validator to report to all raw data requests at once.
-func (k Keeper) AddReport(ctx sdk.Context, rid types.RequestID, rep types.Report) error {
-	if err := k.CheckValidReport(ctx, rid, rep); err != nil {
+func (k Keeper) AddReport(
+	ctx sdk.Context,
+	rid types.RequestID,
+	val sdk.ValAddress,
+	reportInTime bool,
+	rawReports []types.RawReport,
+) error {
+	if err := k.CheckValidReport(ctx, rid, val, rawReports); err != nil {
 		return err
 	}
-	k.SetReport(ctx, rid, rep)
+	k.SetReport(ctx, rid, types.NewReport(val, reportInTime, rawReports))
 	return nil
 }
 
-func (k Keeper) CheckValidReport(ctx sdk.Context, rid types.RequestID, rep types.Report) error {
+func (k Keeper) CheckValidReport(
+	ctx sdk.Context,
+	rid types.RequestID,
+	val sdk.ValAddress,
+	rawReports []types.RawReport,
+) error {
 	req, err := k.GetRequest(ctx, rid)
 	if err != nil {
 		return err
 	}
-	val, err := sdk.ValAddressFromBech32(rep.Validator)
-	if err != nil {
-		return err
-	}
-	reqVals := make([]sdk.ValAddress, len(req.RequestedValidators))
-	for idx, reqVal := range req.RequestedValidators {
+	found := false
+	for _, reqVal := range req.RequestedValidators {
 		v, err := sdk.ValAddressFromBech32(reqVal)
 		if err != nil {
 			return err
 		}
-		reqVals[idx] = v
+		if v.Equals(val) {
+			found = true
+			break
+		}
 	}
-	if !ContainsVal(reqVals, val) {
-		return sdkerrors.Wrapf(
-			types.ErrValidatorNotRequested, "reqID: %d, val: %s", rid, rep.Validator)
+	if !found {
+		return types.ErrValidatorNotRequested.Wrapf("reqID: %d, val: %s", rid, val.String())
 	}
 	if k.HasReport(ctx, rid, val) {
-		return sdkerrors.Wrapf(
-			types.ErrValidatorAlreadyReported, "reqID: %d, val: %s", rid, rep.Validator)
+		return types.ErrValidatorAlreadyReported.Wrapf("reqID: %d, val: %s", rid, val.String())
 	}
-	if len(rep.RawReports) != len(req.RawRequests) {
+	if len(rawReports) != len(req.RawRequests) {
 		return types.ErrInvalidReportSize
 	}
-	for _, rep := range rep.RawReports {
+	for _, rep := range rawReports {
 		// Here we can safely assume that external IDs are unique, as this has already been
 		// checked by ValidateBasic performed in baseapp's runTx function.
 		if !ContainsEID(req.RawRequests, rep.ExternalID) {
-			return sdkerrors.Wrapf(
-				types.ErrRawRequestNotFound, "reqID: %d, extID: %d", rid, rep.ExternalID)
+			return types.ErrRawRequestNotFound.Wrapf("reqID: %d, extID: %d", rid, rep.ExternalID)
 		}
 	}
 	return nil
 }
 
 // GetReportIterator returns the iterator for all reports of the given request ID.
-func (k Keeper) GetReportIterator(ctx sdk.Context, rid types.RequestID) sdk.Iterator {
-	return sdk.KVStorePrefixIterator(ctx.KVStore(k.storeKey), types.ReportStoreKey(rid))
+func (k Keeper) GetReportIterator(ctx sdk.Context, rid types.RequestID) dbm.Iterator {
+	return storetypes.KVStorePrefixIterator(ctx.KVStore(k.storeKey), types.ReportStoreKey(rid))
 }
 
 // GetReportCount returns the number of reports for the given request ID.

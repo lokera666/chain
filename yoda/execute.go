@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	ctypes "github.com/cometbft/cometbft/rpc/core/types"
+
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/client/tx"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
@@ -15,25 +17,19 @@ import (
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
-	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 
-	band "github.com/bandprotocol/chain/v2/app"
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
-)
-
-var (
-	// Proto codec for encoding/decoding proto message
-	cdc = band.MakeEncodingConfig().Marshaler
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
 func signAndBroadcast(
-	c *Context, key keyring.Info, msgs []sdk.Msg, gasLimit uint64, memo string,
+	c *Context, key *keyring.Record, msgs []sdk.Msg, gasLimit uint64, memo string,
 ) (string, error) {
 	clientCtx := client.Context{
 		Client:            c.client,
-		TxConfig:          band.MakeEncodingConfig().TxConfig,
+		Codec:             c.bandApp.AppCodec(),
+		TxConfig:          c.bandApp.GetTxConfig(),
 		BroadcastMode:     "sync",
-		InterfaceRegistry: band.MakeEncodingConfig().InterfaceRegistry,
+		InterfaceRegistry: c.bandApp.InterfaceRegistry(),
 	}
 	acc, err := queryAccount(clientCtx, key)
 	if err != nil {
@@ -43,7 +39,7 @@ func signAndBroadcast(
 	txf := tx.Factory{}.
 		WithAccountNumber(acc.GetAccountNumber()).
 		WithSequence(acc.GetSequence()).
-		WithTxConfig(band.MakeEncodingConfig().TxConfig).
+		WithTxConfig(clientCtx.TxConfig).
 		WithGas(gasLimit).WithGasAdjustment(1).
 		WithChainID(cfg.ChainID).
 		WithMemo(memo).
@@ -51,14 +47,19 @@ func signAndBroadcast(
 		WithKeybase(kb).
 		WithAccountRetriever(clientCtx.AccountRetriever)
 
-	execMsg := authz.NewMsgExec(key.GetAddress(), msgs)
-
-	txb, err := tx.BuildUnsignedTx(txf, &execMsg)
+	address, err := key.GetAddress()
 	if err != nil {
 		return "", err
 	}
 
-	err = tx.Sign(txf, key.GetName(), txb, true)
+	execMsg := authz.NewMsgExec(address, msgs)
+
+	txb, err := txf.BuildUnsignedTx(&execMsg)
+	if err != nil {
+		return "", err
+	}
+
+	err = tx.Sign(context.Background(), txf, key.Name, txb, true)
 	if err != nil {
 		return "", err
 	}
@@ -80,9 +81,15 @@ func signAndBroadcast(
 	return res.TxHash, nil
 }
 
-func queryAccount(clientCtx client.Context, key keyring.Info) (client.Account, error) {
+func queryAccount(clientCtx client.Context, key *keyring.Record) (client.Account, error) {
 	accountRetriever := authtypes.AccountRetriever{}
-	acc, err := accountRetriever.GetAccount(clientCtx, key.GetAddress())
+
+	address, err := key.GetAddress()
+	if err != nil {
+		return nil, err
+	}
+
+	acc, err := accountRetriever.GetAccount(clientCtx, address)
 	if err != nil {
 		return nil, err
 	}
@@ -123,11 +130,11 @@ func SubmitReport(c *Context, l *Logger, keyIndex int64, reports []ReportMsgWith
 	}
 	memo := fmt.Sprintf("yoda:%s/exec:%s", version.Version, strings.Join(versions, ","))
 	key := c.keys[keyIndex]
-	// cliCtx := sdkCtx.CLIContext{Client: c.client, TrustNode: true, Codec: cdc}
+
 	clientCtx := client.Context{
 		Client:            c.client,
-		TxConfig:          band.MakeEncodingConfig().TxConfig,
-		InterfaceRegistry: band.MakeEncodingConfig().InterfaceRegistry,
+		TxConfig:          c.bandApp.GetTxConfig(),
+		InterfaceRegistry: c.bandApp.InterfaceRegistry(),
 	}
 
 	gasLimit := estimateGas(c, l, msgs, feeEstimations)
@@ -196,16 +203,16 @@ func GetExecutable(c *Context, l *Logger, hash string) ([]byte, error) {
 	resValue, err := c.fileCache.GetFile(hash)
 	if err != nil {
 		l.Debug(":magnifying_glass_tilted_left: Fetching data source hash: %s from bandchain querier", hash)
-		bz := cdc.MustMarshal(&types.QueryDataRequest{
+		bz := c.bandApp.AppCodec().MustMarshal(&types.QueryDataRequest{
 			DataHash: hash,
 		})
-		res, err := abciQuery(c, l, "/oracle.v1.Query/Data", bz)
+		res, err := abciQuery(c, l, "/band.oracle.v1.Query/Data", bz)
 		if err != nil {
 			l.Error(":exploding_head: Failed to get data source with error: %s", c, err.Error())
 			return nil, err
 		}
 		var dr types.QueryDataResponse
-		err = cdc.Unmarshal(res.Response.GetValue(), &dr)
+		err = c.bandApp.AppCodec().Unmarshal(res.Response.GetValue(), &dr)
 		if err != nil {
 			l.Error(":exploding_head: Failed to unmarshal data source with error: %s", c, err.Error())
 			return nil, err
@@ -222,10 +229,6 @@ func GetExecutable(c *Context, l *Logger, hash string) ([]byte, error) {
 
 // GetDataSourceHash fetches data source hash by id
 func GetDataSourceHash(c *Context, l *Logger, id types.DataSourceID) (string, error) {
-	if hash, ok := c.dataSourceCache.Load(id); ok {
-		return hash.(string), nil
-	}
-
 	res, err := abciQuery(c, l, fmt.Sprintf("/store/%s/key", types.StoreKey), types.DataSourceStoreKey(id))
 	if err != nil {
 		l.Error(":skull: Failed to get data source with error: %s", c, err.Error())
@@ -233,11 +236,9 @@ func GetDataSourceHash(c *Context, l *Logger, id types.DataSourceID) (string, er
 	}
 
 	var d types.DataSource
-	cdc.MustUnmarshal(res.Response.Value, &d)
+	c.bandApp.AppCodec().MustUnmarshal(res.Response.Value, &d)
 
-	hash, _ := c.dataSourceCache.LoadOrStore(id, d.Filename)
-
-	return hash.(string), nil
+	return d.Filename, nil
 }
 
 // GetRequest fetches request by id
@@ -249,7 +250,7 @@ func GetRequest(c *Context, l *Logger, id types.RequestID) (types.Request, error
 	}
 
 	var r types.Request
-	cdc.MustUnmarshal(res.Response.Value, &r)
+	c.bandApp.AppCodec().MustUnmarshal(res.Response.Value, &r)
 
 	return r, nil
 }

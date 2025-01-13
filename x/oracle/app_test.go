@@ -5,63 +5,114 @@ import (
 	"testing"
 	"time"
 
-	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/stretchr/testify/require"
-	abci "github.com/tendermint/tendermint/abci/types"
+	"github.com/stretchr/testify/suite"
 
-	"github.com/bandprotocol/chain/v2/testing/testapp"
-	"github.com/bandprotocol/chain/v2/x/oracle"
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
+	abci "github.com/cometbft/cometbft/abci/types"
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
+
+	"github.com/cosmos/cosmos-sdk/testutil"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	moduletestutil "github.com/cosmos/cosmos-sdk/types/module/testutil"
+
+	band "github.com/bandprotocol/chain/v3/app"
+	bandtesting "github.com/bandprotocol/chain/v3/testing"
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
-func parseEventAttribute(attr interface{}) []byte {
-	return []byte(fmt.Sprint(attr))
+type AppTestSuite struct {
+	suite.Suite
+
+	app *band.BandApp
 }
 
-func TestSuccessRequestOracleData(t *testing.T) {
-	app, ctx, k := testapp.CreateTestInput(true)
+func TestAppTestSuite(t *testing.T) {
+	suite.Run(t, new(AppTestSuite))
+}
 
-	ctx = ctx.WithBlockHeight(4).WithBlockTime(time.Unix(1581589790, 0))
-	handler := oracle.NewHandler(k)
+func (s *AppTestSuite) SetupTest() {
+	dir := testutil.GetTempDir(s.T())
+	s.app = bandtesting.SetupWithCustomHome(false, dir)
+	ctx := s.app.BaseApp.NewUncachedContext(false, cmtproto.Header{})
+
+	// Activate validators
+	for _, v := range bandtesting.Validators {
+		err := s.app.OracleKeeper.Activate(ctx, v.ValAddress)
+		s.Require().NoError(err)
+	}
+
+	_, err := s.app.FinalizeBlock(&abci.RequestFinalizeBlock{Height: s.app.LastBlockHeight() + 1})
+	s.Require().NoError(err)
+	_, err = s.app.Commit()
+	s.Require().NoError(err)
+}
+
+func (s *AppTestSuite) TestSuccessRequestOracleData() {
+	require := s.Require()
+
+	ctx := s.app.BaseApp.NewUncachedContext(false, cmtproto.Header{})
 	requestMsg := types.NewMsgRequestData(
 		types.OracleScriptID(1),
 		[]byte("calldata"),
 		3,
 		2,
 		"app_test",
-		sdk.NewCoins(sdk.NewCoin("uband", sdk.NewInt(9000000))),
-		testapp.TestDefaultPrepareGas,
-		testapp.TestDefaultExecuteGas,
-		testapp.Validators[0].Address,
+		sdk.NewCoins(sdk.NewInt64Coin("uband", 9000000)),
+		bandtesting.TestDefaultPrepareGas,
+		bandtesting.TestDefaultExecuteGas,
+		bandtesting.Validators[0].Address,
+		0,
 	)
-	res, err := handler(ctx, requestMsg)
-	fmt.Println(err)
-	require.NotNil(t, res)
-	require.NoError(t, err)
+
+	res1 := s.app.AccountKeeper.GetAccount(ctx, bandtesting.Validators[0].Address)
+	require.NotNil(res1)
+
+	acc1Num := res1.GetAccountNumber()
+	acc1Seq := res1.GetSequence()
+
+	txConfig := moduletestutil.MakeTestTxConfig()
+	_, res, _, err := bandtesting.SignCheckDeliver(
+		s.T(),
+		txConfig,
+		s.app.BaseApp,
+		cmtproto.Header{Height: s.app.LastBlockHeight() + 1, Time: time.Unix(1581589790, 0)},
+		[]sdk.Msg{requestMsg},
+		s.app.ChainID(),
+		[]uint64{acc1Num},
+		[]uint64{acc1Seq},
+		true,
+		true,
+		bandtesting.Validators[0].PrivKey,
+	)
+	require.NotNil(res)
+	require.NoError(err)
 
 	expectRequest := types.NewRequest(
 		types.OracleScriptID(1),
 		[]byte("calldata"),
 		[]sdk.ValAddress{
-			testapp.Validators[2].ValAddress,
-			testapp.Validators[0].ValAddress,
-			testapp.Validators[1].ValAddress,
+			bandtesting.Validators[0].ValAddress,
+			bandtesting.Validators[2].ValAddress,
+			bandtesting.Validators[1].ValAddress,
 		},
 		2,
-		4,
-		testapp.ParseTime(1581589790),
+		2,
+		bandtesting.ParseTime(1581589790),
 		"app_test",
 		[]types.RawRequest{
-			types.NewRawRequest(1, 1, []byte("beeb")),
-			types.NewRawRequest(2, 2, []byte("beeb")),
-			types.NewRawRequest(3, 3, []byte("beeb")),
+			types.NewRawRequest(1, 1, []byte("test")),
+			types.NewRawRequest(2, 2, []byte("test")),
+			types.NewRawRequest(3, 3, []byte("test")),
 		},
 		nil,
-		testapp.TestDefaultExecuteGas,
+		bandtesting.TestDefaultExecuteGas,
+		0,
+		bandtesting.Validators[0].Address.String(),
+		nil,
 	)
-	app.EndBlocker(ctx, abci.RequestEndBlock{Height: 4})
-	request, err := k.GetRequest(ctx, types.RequestID(1))
-	require.Equal(t, expectRequest, request)
+
+	request, err := s.app.OracleKeeper.GetRequest(ctx, types.RequestID(1))
+	require.NoError(err)
+	require.Equal(expectRequest, request)
 
 	reportMsg1 := types.NewMsgReportData(
 		types.RequestID(1), []types.RawReport{
@@ -69,149 +120,224 @@ func TestSuccessRequestOracleData(t *testing.T) {
 			types.NewRawReport(2, 0, []byte("answer2")),
 			types.NewRawReport(3, 0, []byte("answer3")),
 		},
-		testapp.Validators[0].ValAddress,
+		bandtesting.Validators[0].ValAddress,
 	)
-	res, err = handler(ctx, reportMsg1)
-	require.NotNil(t, res)
-	require.NoError(t, err)
+	_, res, _, err = bandtesting.SignCheckDeliver(
+		s.T(),
+		txConfig,
+		s.app.BaseApp,
+		cmtproto.Header{Height: s.app.LastBlockHeight() + 1, Time: time.Unix(1581589791, 0)},
+		[]sdk.Msg{reportMsg1},
+		s.app.ChainID(),
+		[]uint64{acc1Num},
+		[]uint64{acc1Seq + 1},
+		true,
+		true,
+		bandtesting.Validators[0].PrivKey,
+	)
+	require.NotNil(res)
+	require.NoError(err)
 
-	ids := k.GetPendingResolveList(ctx)
-	require.Equal(t, []types.RequestID{}, ids)
-	_, err = k.GetResult(ctx, types.RequestID(1))
-	require.Error(t, err)
+	ids := s.app.OracleKeeper.GetPendingResolveList(ctx)
+	require.Equal([]types.RequestID{}, ids)
+	_, err = s.app.OracleKeeper.GetResult(ctx, types.RequestID(1))
+	require.Error(err)
 
-	result := app.EndBlocker(ctx, abci.RequestEndBlock{Height: 6})
-	expectEvents := []abci.Event{}
-
-	require.Equal(t, expectEvents, result.GetEvents())
-
-	ctx = ctx.WithBlockTime(time.Unix(1581589795, 0))
 	reportMsg2 := types.NewMsgReportData(
 		types.RequestID(1), []types.RawReport{
 			types.NewRawReport(1, 0, []byte("answer1")),
 			types.NewRawReport(2, 0, []byte("answer2")),
 			types.NewRawReport(3, 0, []byte("answer3")),
 		},
-		testapp.Validators[1].ValAddress,
+		bandtesting.Validators[1].ValAddress,
 	)
-	res, err = handler(ctx, reportMsg2)
-	require.NotNil(t, res)
-	require.NoError(t, err)
 
-	ids = k.GetPendingResolveList(ctx)
-	require.Equal(t, []types.RequestID{1}, ids)
-	_, err = k.GetResult(ctx, types.RequestID(1))
-	require.Error(t, err)
+	res2 := s.app.AccountKeeper.GetAccount(ctx, bandtesting.Validators[1].Address)
+	require.NotNil(res2)
 
-	result = app.EndBlocker(ctx, abci.RequestEndBlock{Height: 8})
+	acc2Num := res2.GetAccountNumber()
+	acc2Seq := res2.GetSequence()
+
+	// res, err = handler(ctx, reportMsg2)
+	_, res, endBlockEvent, err := bandtesting.SignCheckDeliver(
+		s.T(),
+		txConfig,
+		s.app.BaseApp,
+		cmtproto.Header{Height: s.app.LastBlockHeight() + 1, Time: time.Unix(1581589795, 0)},
+		[]sdk.Msg{reportMsg2},
+		s.app.ChainID(),
+		[]uint64{acc2Num},
+		[]uint64{acc2Seq},
+		true,
+		true,
+		bandtesting.Validators[1].PrivKey,
+	)
+
+	require.NotNil(res)
+	require.NoError(err)
+
 	resPacket := types.NewOracleResponsePacketData(
-		expectRequest.ClientID, types.RequestID(1), 2, int64(expectRequest.RequestTime), 1581589795,
-		types.RESOLVE_STATUS_SUCCESS, []byte("beeb"),
+		expectRequest.ClientID,
+		types.RequestID(1),
+		2,
+		expectRequest.RequestTime,
+		1581589795,
+		types.RESOLVE_STATUS_SUCCESS,
+		[]byte("test"),
 	)
-	expectEvents = []abci.Event{{Type: types.EventTypeResolve, Attributes: []abci.EventAttribute{
-		{Key: []byte(types.AttributeKeyID), Value: parseEventAttribute(resPacket.RequestID)},
-		{Key: []byte(types.AttributeKeyResolveStatus), Value: parseEventAttribute(uint32(resPacket.ResolveStatus))},
-		{Key: []byte(types.AttributeKeyResult), Value: []byte("62656562")},
-		{Key: []byte(types.AttributeKeyGasUsed), Value: []byte("516")},
-	}}}
+	expRes := types.NewResult(
+		resPacket.ClientID,
+		types.OracleScriptID(1),
+		[]byte("calldata"),
+		3,
+		2,
+		types.RequestID(1),
+		2,
+		time.Unix(1581589790, 0).Unix(),
+		time.Unix(1581589795, 0).Unix(),
+		resPacket.ResolveStatus,
+		resPacket.Result,
+	)
 
-	require.Equal(t, expectEvents, result.GetEvents())
+	// Resolve event must contain in block event
+	expectEvent := abci.Event{Type: types.EventTypeResolve, Attributes: []abci.EventAttribute{
+		{Key: types.AttributeKeyID, Value: fmt.Sprint(resPacket.RequestID), Index: true},
+		{Key: types.AttributeKeyResolveStatus, Value: fmt.Sprint(uint32(resPacket.ResolveStatus)), Index: true},
+		{Key: types.AttributeKeyResult, Value: "74657374", Index: true},
+		{Key: types.AttributeKeyGasUsed, Value: "2485000000", Index: true},
+		{Key: "mode", Value: "EndBlock", Index: true},
+	}}
 
-	ids = k.GetPendingResolveList(ctx)
-	require.Equal(t, []types.RequestID{}, ids)
+	require.Contains(endBlockEvent, expectEvent)
 
-	req, err := k.GetRequest(ctx, types.RequestID(1))
-	require.NotEqual(t, types.Request{}, req)
-	require.NoError(t, err)
+	ctx2 := s.app.BaseApp.NewContext(true)
 
-	ctx = ctx.WithBlockHeight(32).WithBlockTime(ctx.BlockTime().Add(time.Minute))
-	app.EndBlocker(ctx, abci.RequestEndBlock{Height: 32})
+	// Endblock should have been called and no pending request after endblock
+	ids = s.app.OracleKeeper.GetPendingResolveList(ctx)
+	require.Equal([]types.RequestID{}, ids)
+
+	// Request 1 still remain until expired
+	req, err := s.app.OracleKeeper.GetRequest(ctx, types.RequestID(1))
+	require.NotEqual(types.Request{}, req)
+	require.NoError(err)
+
+	// Result 1 should be available
+	result, err := s.app.OracleKeeper.GetResult(ctx2, types.RequestID(1))
+	require.NoError(err)
+	require.Equal(expRes, result)
 }
 
-func TestExpiredRequestOracleData(t *testing.T) {
-	app, ctx, k := testapp.CreateTestInput(true)
+func (s *AppTestSuite) TestExpiredRequestOracleData() {
+	require := s.Require()
 
-	ctx = ctx.WithBlockHeight(4).WithBlockTime(time.Unix(1581589790, 0))
-	handler := oracle.NewHandler(k)
+	// Initialize context and message
+	ctx := s.app.BaseApp.NewUncachedContext(false, cmtproto.Header{
+		Height: 2,
+		Time:   time.Unix(1581589790, 0),
+	})
 	requestMsg := types.NewMsgRequestData(
 		types.OracleScriptID(1),
 		[]byte("calldata"),
 		3,
 		2,
 		"app_test",
-		sdk.NewCoins(sdk.NewCoin("uband", sdk.NewInt(9000000))),
-		testapp.TestDefaultPrepareGas,
-		testapp.TestDefaultExecuteGas,
-		testapp.Validators[0].Address,
+		sdk.NewCoins(sdk.NewInt64Coin("uband", 9000000)),
+		bandtesting.TestDefaultPrepareGas,
+		bandtesting.TestDefaultExecuteGas,
+		bandtesting.Validators[0].Address,
+		0,
 	)
-	res, err := handler(ctx, requestMsg)
-	require.NotNil(t, res)
-	require.NoError(t, err)
 
+	// Signing and delivering the request
+	res1 := s.app.AccountKeeper.GetAccount(ctx, bandtesting.Validators[0].Address)
+	require.NotNil(res1)
+
+	acc1Num := res1.GetAccountNumber()
+	acc1Seq := res1.GetSequence()
+
+	txConfig := moduletestutil.MakeTestTxConfig()
+	_, res, _, err := bandtesting.SignCheckDeliver(
+		s.T(),
+		txConfig,
+		s.app.BaseApp,
+		ctx.BlockHeader(),
+		[]sdk.Msg{requestMsg},
+		s.app.ChainID(),
+		[]uint64{acc1Num},
+		[]uint64{acc1Seq},
+		true,
+		true,
+		bandtesting.Validators[0].PrivKey,
+	)
+	require.NoError(err)
+	require.NotNil(res)
+
+	// Verify request is as expected
 	expectRequest := types.NewRequest(
 		types.OracleScriptID(1),
 		[]byte("calldata"),
 		[]sdk.ValAddress{
-			testapp.Validators[2].ValAddress,
-			testapp.Validators[0].ValAddress,
-			testapp.Validators[1].ValAddress,
+			bandtesting.Validators[0].ValAddress,
+			bandtesting.Validators[2].ValAddress,
+			bandtesting.Validators[1].ValAddress,
 		},
 		2,
-		4,
-		testapp.ParseTime(1581589790),
+		2,
+		bandtesting.ParseTime(1581589790),
 		"app_test",
 		[]types.RawRequest{
-			types.NewRawRequest(1, 1, []byte("beeb")),
-			types.NewRawRequest(2, 2, []byte("beeb")),
-			types.NewRawRequest(3, 3, []byte("beeb")),
+			types.NewRawRequest(1, 1, []byte("test")),
+			types.NewRawRequest(2, 2, []byte("test")),
+			types.NewRawRequest(3, 3, []byte("test")),
 		},
 		nil,
-		testapp.TestDefaultExecuteGas,
+		bandtesting.TestDefaultExecuteGas,
+		0,
+		bandtesting.Validators[0].Address.String(),
+		nil,
 	)
-	app.EndBlocker(ctx, abci.RequestEndBlock{Height: 4})
-	request, err := k.GetRequest(ctx, types.RequestID(1))
-	require.Equal(t, expectRequest, request)
 
+	request, err := s.app.OracleKeeper.GetRequest(ctx, types.RequestID(1))
+	require.NoError(err)
+	require.Equal(expectRequest, request)
+
+	// Set context to later block height and time to trigger expiration
 	ctx = ctx.WithBlockHeight(132).WithBlockTime(ctx.BlockTime().Add(time.Minute))
-	result := app.EndBlocker(ctx, abci.RequestEndBlock{Height: 132})
+	result, err := s.app.EndBlocker(ctx)
+	require.NoError(err)
+
+	// Expected events after expiration
 	resPacket := types.NewOracleResponsePacketData(
-		expectRequest.ClientID, types.RequestID(1), 0, int64(expectRequest.RequestTime), ctx.BlockTime().Unix(),
-		types.RESOLVE_STATUS_EXPIRED, []byte{},
+		expectRequest.ClientID,
+		types.RequestID(1),
+		0,
+		expectRequest.RequestTime,
+		ctx.BlockTime().Unix(),
+		types.RESOLVE_STATUS_EXPIRED,
+		[]byte{},
 	)
 	expectEvents := []abci.Event{{
 		Type: types.EventTypeResolve,
 		Attributes: []abci.EventAttribute{
-			{Key: []byte(types.AttributeKeyID), Value: parseEventAttribute(resPacket.RequestID)},
-			{
-				Key:   []byte(types.AttributeKeyResolveStatus),
-				Value: parseEventAttribute(uint32(resPacket.ResolveStatus)),
-			},
+			{Key: types.AttributeKeyID, Value: fmt.Sprint(resPacket.RequestID)},
+			{Key: types.AttributeKeyResolveStatus, Value: fmt.Sprint(uint32(resPacket.ResolveStatus))},
 		},
 	}, {
 		Type: types.EventTypeDeactivate,
 		Attributes: []abci.EventAttribute{
-			{
-				Key:   []byte(types.AttributeKeyValidator),
-				Value: parseEventAttribute(testapp.Validators[2].ValAddress.String()),
-			},
+			{Key: types.AttributeKeyValidator, Value: bandtesting.Validators[0].ValAddress.String()},
 		},
 	}, {
 		Type: types.EventTypeDeactivate,
 		Attributes: []abci.EventAttribute{
-			{
-				Key:   []byte(types.AttributeKeyValidator),
-				Value: parseEventAttribute(testapp.Validators[0].ValAddress.String()),
-			},
+			{Key: types.AttributeKeyValidator, Value: bandtesting.Validators[2].ValAddress.String()},
 		},
 	}, {
 		Type: types.EventTypeDeactivate,
 		Attributes: []abci.EventAttribute{
-			{
-				Key:   []byte(types.AttributeKeyValidator),
-				Value: parseEventAttribute(testapp.Validators[1].ValAddress.String()),
-			},
+			{Key: types.AttributeKeyValidator, Value: bandtesting.Validators[1].ValAddress.String()},
 		},
 	}}
 
-	require.Equal(t, expectEvents, result.GetEvents())
+	require.Equal(expectEvents, result.Events)
 }

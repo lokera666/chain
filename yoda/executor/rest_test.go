@@ -10,65 +10,65 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func creatDefaultServer() *httptest.Server {
+func createDefaultServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		res.WriteHeader(200)
 		ret := externalExecutionResponse{
 			Returncode: 0,
-			Stdout:     "BEEB",
+			Stdout:     "TEST",
 			Stderr:     "Stderr",
 		}
-		json.NewEncoder(res).Encode(ret)
+		_ = json.NewEncoder(res).Encode(ret)
 	}))
 }
 
-func createResponseNotOkSenarioServer() *httptest.Server {
+func createResponseNotOkScenarioServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		res.WriteHeader(500)
 	}))
 }
 
-func createCannotDecodeJsonSenarioServer() *httptest.Server {
+func createCannotDecodeJSONScenarioServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		res.WriteHeader(200)
-		res.Write([]byte("invalid bytes"))
+		_, _ = res.Write([]byte("invalid bytes"))
 	}))
 }
 
-func creatExecuteFailSenarioServer() *httptest.Server {
+func createExecuteFailScenarioServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		res.WriteHeader(200)
 		ret := externalExecutionResponse{
 			Returncode: 1,
-			Stdout:     "BEEB",
+			Stdout:     "TEST",
 			Stderr:     "Stderr",
 		}
-		json.NewEncoder(res).Encode(ret)
+		_ = json.NewEncoder(res).Encode(ret)
 	}))
 }
 
 func TestExecuteSuccess(t *testing.T) {
-	testServer := creatDefaultServer()
+	testServer := createDefaultServer()
 	defer func() { testServer.Close() }()
 
 	executor := NewRestExec(testServer.URL, 1*time.Second)
 	res, err := executor.Exec([]byte("executable"), "calldata", nil)
 	require.NoError(t, err)
 	require.Equal(t, uint32(0), res.Code)
-	require.Equal(t, []byte("BEEB"), res.Output)
+	require.Equal(t, []byte("TEST"), res.Output)
 }
 
 func TestExecuteBadUrlFail(t *testing.T) {
-	testServer := creatDefaultServer()
+	testServer := createDefaultServer()
 	defer func() { testServer.Close() }()
 
-	executor := NewRestExec("www.beeb.com", 1*time.Second) // bad url
+	executor := NewRestExec("www.test.com", 1*time.Second) // bad url
 	_, err := executor.Exec([]byte("executable"), "calldata", nil)
 	require.Error(t, err)
 }
 
 func TestExecuteDecodeStructFail(t *testing.T) {
-	testServer := createCannotDecodeJsonSenarioServer()
+	testServer := createCannotDecodeJSONScenarioServer()
 	defer func() { testServer.Close() }()
 
 	executor := NewRestExec(testServer.URL, 1*time.Second)
@@ -77,7 +77,7 @@ func TestExecuteDecodeStructFail(t *testing.T) {
 }
 
 func TestExecuteResponseNotOk(t *testing.T) {
-	testServer := createResponseNotOkSenarioServer()
+	testServer := createResponseNotOkScenarioServer()
 	defer func() { testServer.Close() }()
 
 	executor := NewRestExec(testServer.URL, 1*time.Second)
@@ -86,7 +86,7 @@ func TestExecuteResponseNotOk(t *testing.T) {
 }
 
 func TestExecuteFail(t *testing.T) {
-	testServer := creatExecuteFailSenarioServer()
+	testServer := createExecuteFailScenarioServer()
 	defer func() { testServer.Close() }()
 
 	executor := NewRestExec(testServer.URL, 1*time.Second)

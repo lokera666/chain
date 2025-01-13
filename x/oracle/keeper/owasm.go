@@ -4,20 +4,29 @@ import (
 	"encoding/hex"
 	"fmt"
 
+	"cosmossdk.io/math"
+
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 
-	"github.com/bandprotocol/chain/v2/pkg/bandrng"
-
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
+	"github.com/bandprotocol/chain/v3/pkg/bandrng"
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
-// 1 cosmos gas is equal to 7 owasm gas
-const gasConversionFactor = 7
+// 1 cosmos gas is equal to 20000000 owasm gas
+const gasConversionFactor = 20_000_000
 
-func ConvertToOwasmGas(cosmos uint64) uint32 {
-	return uint32(cosmos * gasConversionFactor)
+func ConvertToOwasmGas(cosmos uint64) uint64 {
+	return cosmos * gasConversionFactor
+}
+
+// GetSpanSize return maximum value between MaxReportDataSize and MaxCallDataSize
+func (k Keeper) GetSpanSize(ctx sdk.Context) uint64 {
+	params := k.GetParams(ctx)
+	if params.MaxReportDataSize > params.MaxCalldataSize {
+		return params.MaxReportDataSize
+	}
+	return params.MaxCalldataSize
 }
 
 // GetRandomValidators returns a pseudorandom subset of active validators. Each validator has
@@ -25,23 +34,33 @@ func ConvertToOwasmGas(cosmos uint64) uint32 {
 func (k Keeper) GetRandomValidators(ctx sdk.Context, size int, id uint64) ([]sdk.ValAddress, error) {
 	valOperators := []sdk.ValAddress{}
 	valPowers := []uint64{}
-	k.stakingKeeper.IterateBondedValidatorsByPower(ctx,
+	err := k.stakingKeeper.IterateBondedValidatorsByPower(ctx,
 		func(idx int64, val stakingtypes.ValidatorI) (stop bool) {
-			if k.GetValidatorStatus(ctx, val.GetOperator()).IsActive {
-				valOperators = append(valOperators, val.GetOperator())
+			operator, err := sdk.ValAddressFromBech32(val.GetOperator())
+			if err != nil {
+				return false
+			}
+			if k.GetValidatorStatus(ctx, operator).IsActive {
+				valOperators = append(valOperators, operator)
 				valPowers = append(valPowers, val.GetTokens().Uint64())
 			}
 			return false
 		})
-	if len(valOperators) < size {
-		return nil, sdkerrors.Wrapf(
-			types.ErrInsufficientValidators, "%d < %d", len(valOperators), size)
-	}
-	rng, err := bandrng.NewRng(k.GetRollingSeed(ctx), sdk.Uint64ToBigEndian(id), []byte(ctx.ChainID()))
 	if err != nil {
-		return nil, sdkerrors.Wrapf(types.ErrBadDrbgInitialization, err.Error())
+		return nil, err
 	}
-	tryCount := int(k.SamplingTryCount(ctx))
+	if len(valOperators) < size {
+		return nil, types.ErrInsufficientValidators.Wrapf("%d < %d", len(valOperators), size)
+	}
+	rng, err := bandrng.NewRng(
+		k.rollingseedKepper.GetRollingSeed(ctx),
+		sdk.Uint64ToBigEndian(id),
+		[]byte(ctx.ChainID()),
+	)
+	if err != nil {
+		return nil, types.ErrBadDrbgInitialization.Wrap(err.Error())
+	}
+	tryCount := int(k.GetParams(ctx).SamplingTryCount)
 	chosenValIndexes := bandrng.ChooseSomeMaxWeight(rng, valPowers, size, tryCount)
 	validators := make([]sdk.ValAddress, size)
 	for i, idx := range chosenValIndexes {
@@ -59,17 +78,18 @@ func (k Keeper) PrepareRequest(
 	ibcChannel *types.IBCChannel,
 ) (types.RequestID, error) {
 	calldataSize := len(r.GetCalldata())
-	if calldataSize > int(k.MaxCalldataSize(ctx)) {
-		return 0, types.WrapMaxError(types.ErrTooLargeCalldata, calldataSize, int(k.MaxCalldataSize(ctx)))
+	if calldataSize > int(k.GetSpanSize(ctx)) {
+		return 0, types.WrapMaxError(types.ErrTooLargeCalldata, calldataSize, int(k.GetSpanSize(ctx)))
 	}
 
 	askCount := r.GetAskCount()
-	if askCount > k.MaxAskCount(ctx) {
-		return 0, types.WrapMaxError(types.ErrInvalidAskCount, int(askCount), int(k.MaxAskCount(ctx)))
+	params := k.GetParams(ctx)
+	if askCount > params.MaxAskCount {
+		return 0, types.WrapMaxError(types.ErrInvalidAskCount, int(askCount), int(params.MaxAskCount))
 	}
 
 	// Consume gas for data requests.
-	ctx.GasMeter().ConsumeGas(askCount*k.PerValidatorRequestGas(ctx), "PER_VALIDATOR_REQUEST_FEE")
+	ctx.GasMeter().ConsumeGas(askCount*params.PerValidatorRequestGas, "PER_VALIDATOR_REQUEST_FEE")
 
 	// Get a random validator set to perform this request.
 	validators, err := k.GetRandomValidators(ctx, int(askCount), k.GetRequestCount(ctx)+1)
@@ -79,24 +99,40 @@ func (k Keeper) PrepareRequest(
 
 	// Create a request object. Note that RawRequestIDs will be populated after preparation is done.
 	req := types.NewRequest(
-		r.GetOracleScriptID(), r.GetCalldata(), validators, r.GetMinCount(),
-		ctx.BlockHeight(), ctx.BlockTime(), r.GetClientID(), nil, ibcChannel, r.GetExecuteGas(),
+		r.GetOracleScriptID(),
+		r.GetCalldata(),
+		validators,
+		r.GetMinCount(),
+		ctx.BlockHeight(),
+		ctx.BlockTime(),
+		r.GetClientID(),
+		nil,
+		ibcChannel,
+		r.GetExecuteGas(),
+		r.GetTSSEncoder(),
+		feePayer.String(),
+		r.GetFeeLimit(),
 	)
 
 	// Create an execution environment and call Owasm prepare function.
-	env := types.NewPrepareEnv(req, int64(k.MaxCalldataSize(ctx)), int64(k.MaxRawRequestCount(ctx)))
+	env := types.NewPrepareEnv(
+		req,
+		int64(params.MaxCalldataSize),
+		int64(params.MaxRawRequestCount),
+		int64(k.GetSpanSize(ctx)),
+	)
 	script, err := k.GetOracleScript(ctx, req.OracleScriptID)
 	if err != nil {
 		return 0, err
 	}
 
 	// Consume fee and execute owasm code
-	ctx.GasMeter().ConsumeGas(k.BaseOwasmGas(ctx), "BASE_OWASM_FEE")
+	ctx.GasMeter().ConsumeGas(params.BaseOwasmGas, "BASE_OWASM_FEE")
 	ctx.GasMeter().ConsumeGas(r.GetPrepareGas(), "OWASM_PREPARE_FEE")
 	code := k.GetFile(script.Filename)
-	output, err := k.owasmVM.Prepare(code, ConvertToOwasmGas(r.GetPrepareGas()), int64(k.MaxCalldataSize(ctx)), env)
+	output, err := k.owasmVM.Prepare(code, ConvertToOwasmGas(r.GetPrepareGas()), env)
 	if err != nil {
-		return 0, sdkerrors.Wrapf(types.ErrBadWasmExecution, err.Error())
+		return 0, types.ErrBadWasmExecution.Wrap(err.Error())
 	}
 
 	// Preparation complete! It's time to collect raw request ids.
@@ -105,11 +141,13 @@ func (k Keeper) PrepareRequest(
 		return 0, types.ErrEmptyRawRequests
 	}
 	// Collect ds fee
-	totalFees, err := k.CollectFee(ctx, feePayer, r.GetFeeLimit(), askCount, req.RawRequests)
+	totalFees, err := k.CollectFee(ctx, feePayer, req.FeeLimit, askCount, req.RawRequests)
 	if err != nil {
 		return 0, err
 	}
+
 	// We now have everything we need to the request, so let's add it to the store.
+	req.FeeLimit = req.FeeLimit.Sub(totalFees...)
 	id := k.AddRequest(ctx, req)
 
 	// Emit an event describing a data request and asked validators.
@@ -130,7 +168,7 @@ func (k Keeper) PrepareRequest(
 	ctx.EventManager().EmitEvent(event)
 
 	// Subtract execute fee
-	ctx.GasMeter().ConsumeGas(k.BaseOwasmGas(ctx), "BASE_OWASM_FEE")
+	ctx.GasMeter().ConsumeGas(params.BaseOwasmGas, "BASE_OWASM_FEE")
 	ctx.GasMeter().ConsumeGas(r.GetExecuteGas(), "OWASM_EXECUTE_FEE")
 
 	// Emit an event for each of the raw data requests.
@@ -155,22 +193,17 @@ func (k Keeper) PrepareRequest(
 // assumes that the given request is in a resolvable state with sufficient reporters.
 func (k Keeper) ResolveRequest(ctx sdk.Context, reqID types.RequestID) {
 	req := k.MustGetRequest(ctx, reqID)
-	env := types.NewExecuteEnv(req, k.GetReports(ctx, reqID), ctx.BlockTime())
+	env := types.NewExecuteEnv(req, k.GetReports(ctx, reqID), ctx.BlockTime(), int64(k.GetSpanSize(ctx)))
 	script := k.MustGetOracleScript(ctx, req.OracleScriptID)
 	code := k.GetFile(script.Filename)
-	output, err := k.owasmVM.Execute(
-		code,
-		ConvertToOwasmGas(req.GetExecuteGas()),
-		int64(k.MaxReportDataSize(ctx)),
-		env,
-	)
+	output, err := k.owasmVM.Execute(code, ConvertToOwasmGas(req.GetExecuteGas()), env)
 
 	if err != nil {
 		k.ResolveFailure(ctx, reqID, err.Error())
 	} else if env.Retdata == nil {
 		k.ResolveFailure(ctx, reqID, "no return data")
 	} else {
-		k.ResolveSuccess(ctx, reqID, env.Retdata, output.GasUsed)
+		k.ResolveSuccess(ctx, reqID, req.Requester, req.FeeLimit, env.Retdata, output.GasUsed, req.TSSEncoder)
 	}
 }
 
@@ -196,7 +229,7 @@ func (k Keeper) CollectFee(
 
 		fee := sdk.NewCoins()
 		for _, c := range ds.Fee {
-			c.Amount = c.Amount.Mul(sdk.NewInt(int64(askCount)))
+			c.Amount = c.Amount.Mul(math.NewInt(int64(askCount)))
 			fee = fee.Add(c)
 		}
 

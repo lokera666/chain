@@ -5,14 +5,16 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	sdk "github.com/cosmos/cosmos-sdk/types"
-	"github.com/cosmos/cosmos-sdk/x/authz"
-	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
-	"github.com/tendermint/tendermint/crypto/secp256k1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
+	"github.com/cometbft/cometbft/crypto/secp256k1"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/cosmos/cosmos-sdk/x/authz"
+	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
+
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
 // Querier is used as Keeper will have duplicate methods if used directly, and gRPC names take precedence over keeper
@@ -26,10 +28,10 @@ var _ types.QueryServer = Querier{}
 func (k Querier) Counts(c context.Context, req *types.QueryCountsRequest) (*types.QueryCountsResponse, error) {
 	ctx := sdk.UnwrapSDKContext(c)
 	return &types.QueryCountsResponse{
-			DataSourceCount:   k.GetDataSourceCount(ctx),
-			OracleScriptCount: k.GetOracleScriptCount(ctx),
-			RequestCount:      k.GetRequestCount(ctx)},
-		nil
+		DataSourceCount:   k.GetDataSourceCount(ctx),
+		OracleScriptCount: k.GetOracleScriptCount(ctx),
+		RequestCount:      k.GetRequestCount(ctx),
+	}, nil
 }
 
 // Data queries the data source or oracle script script for given file hash.
@@ -84,6 +86,16 @@ func (k Querier) Request(c context.Context, req *types.QueryRequestRequest) (*ty
 	ctx := sdk.UnwrapSDKContext(c)
 	rid := types.RequestID(req.RequestId)
 
+	// Check if there is a signing ID associated with the request
+	// Note: ignore error because it's possible to not have signing result.
+	var signingResult *types.SigningResult
+	sResult, err := k.GetSigningResult(ctx, rid)
+	if err != nil {
+		signingResult = nil
+	} else {
+		signingResult = &sResult
+	}
+
 	request, err := k.GetRequest(ctx, rid)
 	if err != nil {
 		lastExpired := k.GetRequestLastExpired(ctx)
@@ -98,16 +110,22 @@ func (k Querier) Request(c context.Context, req *types.QueryRequestRequest) (*ty
 			)
 		}
 		result := k.MustGetResult(ctx, rid)
-		return &types.QueryRequestResponse{Request: nil, Reports: nil, Result: &result}, nil
+		return &types.QueryRequestResponse{Request: nil, Reports: nil, Result: &result, Signing: signingResult}, nil
 	}
 
 	reports := k.GetReports(ctx, rid)
 	if !k.HasResult(ctx, rid) {
-		return &types.QueryRequestResponse{Request: &request, Reports: reports, Result: nil}, nil
+		return &types.QueryRequestResponse{Request: &request, Reports: reports, Result: nil, Signing: nil}, nil
 	}
 
 	result := k.MustGetResult(ctx, rid)
-	return &types.QueryRequestResponse{Request: &request, Reports: reports, Result: &result}, nil
+
+	return &types.QueryRequestResponse{
+		Request: &request,
+		Reports: reports,
+		Result:  &result,
+		Signing: signingResult,
+	}, nil
 }
 
 func (k Querier) PendingRequests(
@@ -199,9 +217,6 @@ func (k Querier) Validator(
 		return nil, err
 	}
 	status := k.GetValidatorStatus(ctx, val)
-	if err != nil {
-		return nil, err
-	}
 	return &types.QueryValidatorResponse{Status: &status}, nil
 }
 
@@ -222,7 +237,7 @@ func (k Querier) IsReporter(
 	return &types.QueryIsReporterResponse{IsReporter: k.Keeper.IsReporter(ctx, val, rep)}, nil
 }
 
-// Reporters queries 100 gratees of a given validator address and filter for reporter.
+// Reporters queries 100 grantees of a given validator address and filter for reporter.
 func (k Querier) Reporters(
 	c context.Context,
 	req *types.QueryReportersRequest,
@@ -265,16 +280,23 @@ func (k Querier) ActiveValidators(
 	}
 	ctx := sdk.UnwrapSDKContext(c)
 	result := types.QueryActiveValidatorsResponse{}
-	k.stakingKeeper.IterateBondedValidatorsByPower(ctx,
+	err := k.stakingKeeper.IterateBondedValidatorsByPower(ctx,
 		func(idx int64, val stakingtypes.ValidatorI) (stop bool) {
-			if k.GetValidatorStatus(ctx, val.GetOperator()).IsActive {
+			operator, err := sdk.ValAddressFromBech32(val.GetOperator())
+			if err != nil {
+				return false
+			}
+			if k.GetValidatorStatus(ctx, operator).IsActive {
 				result.Validators = append(result.Validators, &types.ActiveValidator{
-					Address: val.GetOperator().String(),
+					Address: val.GetOperator(),
 					Power:   val.GetTokens().Uint64(),
 				})
 			}
 			return false
 		})
+	if err != nil {
+		return nil, err
+	}
 	return &result, nil
 }
 
@@ -341,9 +363,9 @@ func (k Querier) RequestVerification(
 	// Provided signature should be valid, which means this query request should be signed by the provided reporter
 	pk, err := hex.DecodeString(req.Reporter)
 	if err != nil || len(pk) != secp256k1.PubKeySize {
-		return nil, status.Error(codes.InvalidArgument, fmt.Sprintf("unable to get reporter's public key"))
+		return nil, status.Error(codes.InvalidArgument, "unable to get reporter's public key")
 	}
-	reporterPubKey := secp256k1.PubKey(pk[:])
+	reporterPubKey := secp256k1.PubKey(pk)
 
 	requestVerificationContent := types.NewRequestVerification(
 		req.ChainId,
@@ -400,14 +422,14 @@ func (k Querier) RequestVerification(
 	}
 
 	// Provided external ID should be required by the request determined by oracle script
-	var dataSourceID *types.DataSourceID
+	dataSourceID := types.DataSourceID(0)
 	for _, rawRequest := range request.RawRequests {
 		if rawRequest.ExternalID == types.ExternalID(req.ExternalId) {
-			dataSourceID = &rawRequest.DataSourceID
+			dataSourceID = rawRequest.DataSourceID
 			break
 		}
 	}
-	if dataSourceID == nil {
+	if dataSourceID == 0 {
 		return nil, status.Error(
 			codes.InvalidArgument,
 			fmt.Sprintf(
@@ -417,7 +439,7 @@ func (k Querier) RequestVerification(
 			),
 		)
 	}
-	if *dataSourceID != types.DataSourceID(req.DataSourceId) {
+	if dataSourceID != types.DataSourceID(req.DataSourceId) {
 		return nil, status.Error(
 			codes.InvalidArgument,
 			fmt.Sprintf(
@@ -446,7 +468,7 @@ func (k Querier) RequestVerification(
 	}
 
 	// The request should not be expired
-	if request.RequestHeight+int64(k.ExpirationBlockCount(ctx)) < ctx.BlockHeader().Height {
+	if request.RequestHeight+int64(k.GetParams(ctx).ExpirationBlockCount) < ctx.BlockHeader().Height {
 		return nil, status.Error(
 			codes.DeadlineExceeded,
 			fmt.Sprintf("Request with ID %d is already expired", req.RequestId),
@@ -458,7 +480,7 @@ func (k Querier) RequestVerification(
 		Validator:    req.Validator,
 		RequestId:    req.RequestId,
 		ExternalId:   req.ExternalId,
-		DataSourceId: uint64(*dataSourceID),
+		DataSourceId: uint64(dataSourceID),
 		IsDelay:      false,
 	}, nil
 }

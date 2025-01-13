@@ -3,10 +3,11 @@ package keeper
 import (
 	"bytes"
 
-	sdk "github.com/cosmos/cosmos-sdk/types"
-	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
+	storetypes "cosmossdk.io/store/types"
 
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
 // HasOracleScript checks if the oracle script of this ID exists in the storage.
@@ -18,7 +19,7 @@ func (k Keeper) HasOracleScript(ctx sdk.Context, id types.OracleScriptID) bool {
 func (k Keeper) GetOracleScript(ctx sdk.Context, id types.OracleScriptID) (types.OracleScript, error) {
 	bz := ctx.KVStore(k.storeKey).Get(types.OracleScriptStoreKey(id))
 	if bz == nil {
-		return types.OracleScript{}, sdkerrors.Wrapf(types.ErrOracleScriptNotFound, "id: %d", id)
+		return types.OracleScript{}, types.ErrOracleScriptNotFound.Wrapf("id: %d", id)
 	}
 	var oracleScript types.OracleScript
 	k.cdc.MustUnmarshal(bz, &oracleScript)
@@ -62,7 +63,7 @@ func (k Keeper) MustEditOracleScript(ctx sdk.Context, id types.OracleScriptID, n
 // GetAllOracleScripts returns the list of all oracle scripts in the store, or nil if there is none.
 func (k Keeper) GetAllOracleScripts(ctx sdk.Context) (oracleScripts []types.OracleScript) {
 	store := ctx.KVStore(k.storeKey)
-	iterator := sdk.KVStorePrefixIterator(store, types.OracleScriptStoreKeyPrefix)
+	iterator := storetypes.KVStorePrefixIterator(store, types.OracleScriptStoreKeyPrefix)
 	defer iterator.Close()
 	for ; iterator.Valid(); iterator.Next() {
 		var oracleScript types.OracleScript
@@ -80,7 +81,7 @@ func (k Keeper) AddOracleScriptFile(file []byte) (string, error) {
 	}
 	compiledFile, err := k.owasmVM.Compile(file, types.MaxCompiledWasmCodeSize)
 	if err != nil {
-		return "", sdkerrors.Wrapf(types.ErrOwasmCompilation, "caused by %s", err.Error())
+		return "", types.ErrOwasmCompilation.Wrapf("caused by %s", err.Error())
 	}
 	return k.fileCache.AddFile(compiledFile), nil
 }

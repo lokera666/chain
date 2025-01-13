@@ -3,10 +3,11 @@ package keeper
 import (
 	"bytes"
 
-	sdk "github.com/cosmos/cosmos-sdk/types"
-	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
+	storetypes "cosmossdk.io/store/types"
 
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
+
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
 // HasDataSource checks if the data source of this ID exists in the storage.
@@ -18,7 +19,7 @@ func (k Keeper) HasDataSource(ctx sdk.Context, id types.DataSourceID) bool {
 func (k Keeper) GetDataSource(ctx sdk.Context, id types.DataSourceID) (types.DataSource, error) {
 	bz := ctx.KVStore(k.storeKey).Get(types.DataSourceStoreKey(id))
 	if bz == nil {
-		return types.DataSource{}, sdkerrors.Wrapf(types.ErrDataSourceNotFound, "id: %d", id)
+		return types.DataSource{}, types.ErrDataSourceNotFound.Wrapf("id: %d", id)
 	}
 	var dataSource types.DataSource
 	k.cdc.MustUnmarshal(bz, &dataSource)
@@ -62,7 +63,7 @@ func (k Keeper) MustEditDataSource(ctx sdk.Context, id types.DataSourceID, new t
 // GetAllDataSources returns the list of all data sources in the store, or nil if there is none.
 func (k Keeper) GetAllDataSources(ctx sdk.Context) (dataSources []types.DataSource) {
 	store := ctx.KVStore(k.storeKey)
-	iterator := sdk.KVStorePrefixIterator(store, types.DataSourceStoreKeyPrefix)
+	iterator := storetypes.KVStorePrefixIterator(store, types.DataSourceStoreKeyPrefix)
 	defer iterator.Close()
 	for ; iterator.Valid(); iterator.Next() {
 		var dataSource types.DataSource

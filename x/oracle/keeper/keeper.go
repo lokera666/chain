@@ -5,48 +5,51 @@ import (
 	"fmt"
 	"time"
 
+	capabilitykeeper "github.com/cosmos/ibc-go/modules/capability/keeper"
+	capabilitytypes "github.com/cosmos/ibc-go/modules/capability/types"
+	porttypes "github.com/cosmos/ibc-go/v8/modules/core/05-port/types"
+	host "github.com/cosmos/ibc-go/v8/modules/core/24-host"
+
+	"cosmossdk.io/log"
+	storetypes "cosmossdk.io/store/types"
+
 	"github.com/cosmos/cosmos-sdk/codec"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/x/authz"
-	capabilitykeeper "github.com/cosmos/cosmos-sdk/x/capability/keeper"
-	capabilitytypes "github.com/cosmos/cosmos-sdk/x/capability/types"
-	paramtypes "github.com/cosmos/cosmos-sdk/x/params/types"
-	host "github.com/cosmos/ibc-go/v3/modules/core/24-host"
-	"github.com/tendermint/tendermint/libs/log"
 
 	owasm "github.com/bandprotocol/go-owasm/api"
 
-	"github.com/bandprotocol/chain/v2/pkg/filecache"
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
-)
-
-const (
-	RollingSeedSizeInBytes = 32
+	"github.com/bandprotocol/chain/v3/pkg/filecache"
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
 type Keeper struct {
-	storeKey         sdk.StoreKey
+	storeKey         storetypes.StoreKey
 	cdc              codec.BinaryCodec
 	fileCache        filecache.Cache
 	feeCollectorName string
-	paramstore       paramtypes.Subspace
 	owasmVM          *owasm.Vm
 
-	authKeeper    types.AccountKeeper
-	bankKeeper    types.BankKeeper
-	stakingKeeper types.StakingKeeper
-	distrKeeper   types.DistrKeeper
-	authzKeeper   types.AuthzKeeper
-	channelKeeper types.ChannelKeeper
-	portKeeper    types.PortKeeper
-	scopedKeeper  capabilitykeeper.ScopedKeeper
+	authKeeper        types.AccountKeeper
+	bankKeeper        types.BankKeeper
+	stakingKeeper     types.StakingKeeper
+	distrKeeper       types.DistrKeeper
+	authzKeeper       types.AuthzKeeper
+	ics4Wrapper       porttypes.ICS4Wrapper
+	portKeeper        types.PortKeeper
+	rollingseedKepper types.RollingseedKeeper
+	bandtssKeeper     types.BandtssKeeper
+	scopedKeeper      capabilitykeeper.ScopedKeeper
+
+	// the address capable of executing a MsgUpdateParams message. Typically, this
+	// should be the x/gov module account.
+	authority string
 }
 
 // NewKeeper creates a new oracle Keeper instance.
 func NewKeeper(
 	cdc codec.BinaryCodec,
-	key sdk.StoreKey,
-	ps paramtypes.Subspace,
+	key storetypes.StoreKey,
 	fileDir string,
 	feeCollectorName string,
 	authKeeper types.AccountKeeper,
@@ -54,45 +57,42 @@ func NewKeeper(
 	stakingKeeper types.StakingKeeper,
 	distrKeeper types.DistrKeeper,
 	authzKeeper types.AuthzKeeper,
-	channelKeeper types.ChannelKeeper,
+	ics4Wrapper porttypes.ICS4Wrapper,
 	portKeeper types.PortKeeper,
+	rollingseedKepper types.RollingseedKeeper,
+	bandtssKeeper types.BandtssKeeper,
 	scopeKeeper capabilitykeeper.ScopedKeeper,
 	owasmVM *owasm.Vm,
+	authority string,
 ) Keeper {
-	if !ps.HasKeyTable() {
-		ps = ps.WithKeyTable(types.ParamKeyTable())
-	}
 	return Keeper{
-		storeKey:         key,
-		cdc:              cdc,
-		fileCache:        filecache.New(fileDir),
-		feeCollectorName: feeCollectorName,
-		paramstore:       ps,
-		owasmVM:          owasmVM,
-		authKeeper:       authKeeper,
-		bankKeeper:       bankKeeper,
-		stakingKeeper:    stakingKeeper,
-		distrKeeper:      distrKeeper,
-		authzKeeper:      authzKeeper,
-		channelKeeper:    channelKeeper,
-		portKeeper:       portKeeper,
-		scopedKeeper:     scopeKeeper,
+		storeKey:          key,
+		cdc:               cdc,
+		fileCache:         filecache.New(fileDir),
+		feeCollectorName:  feeCollectorName,
+		owasmVM:           owasmVM,
+		authKeeper:        authKeeper,
+		bankKeeper:        bankKeeper,
+		stakingKeeper:     stakingKeeper,
+		distrKeeper:       distrKeeper,
+		authzKeeper:       authzKeeper,
+		ics4Wrapper:       ics4Wrapper,
+		portKeeper:        portKeeper,
+		rollingseedKepper: rollingseedKepper,
+		bandtssKeeper:     bandtssKeeper,
+		scopedKeeper:      scopeKeeper,
+		authority:         authority,
 	}
+}
+
+// GetAuthority returns the x/oracle module's authority.
+func (k Keeper) GetAuthority() string {
+	return k.authority
 }
 
 // Logger returns a module-specific logger.
 func (k Keeper) Logger(ctx sdk.Context) log.Logger {
 	return ctx.Logger().With("module", fmt.Sprintf("x/%s", types.ModuleName))
-}
-
-// SetRollingSeed sets the rolling seed value to be provided value.
-func (k Keeper) SetRollingSeed(ctx sdk.Context, rollingSeed []byte) {
-	ctx.KVStore(k.storeKey).Set(types.RollingSeedStoreKey, rollingSeed)
-}
-
-// GetRollingSeed returns the current rolling seed value.
-func (k Keeper) GetRollingSeed(ctx sdk.Context) []byte {
-	return ctx.KVStore(k.storeKey).Get(types.RollingSeedStoreKey)
 }
 
 // SetRequestCount sets the number of request count to the given value. Useful for genesis state.
@@ -211,7 +211,7 @@ func (k Keeper) ClaimCapability(ctx sdk.Context, cap *capabilitytypes.Capability
 
 // IsReporter checks if the validator granted to the reporter
 func (k Keeper) IsReporter(ctx sdk.Context, validator sdk.ValAddress, reporter sdk.AccAddress) bool {
-	cap, _ := k.authzKeeper.GetCleanAuthorization(
+	cap, _ := k.authzKeeper.GetAuthorization(
 		ctx,
 		reporter,
 		sdk.AccAddress(validator),
@@ -222,8 +222,9 @@ func (k Keeper) IsReporter(ctx sdk.Context, validator sdk.ValAddress, reporter s
 
 // GrantReporter grants the reporter to validator for testing
 func (k Keeper) GrantReporter(ctx sdk.Context, validator sdk.ValAddress, reporter sdk.AccAddress) error {
+	expiration := ctx.BlockTime().Add(10 * time.Minute)
 	return k.authzKeeper.SaveGrant(ctx, reporter, sdk.AccAddress(validator),
-		authz.NewGenericAuthorization(sdk.MsgTypeURL(&types.MsgReportData{})), ctx.BlockTime().Add(10*time.Minute),
+		authz.NewGenericAuthorization(sdk.MsgTypeURL(&types.MsgReportData{})), &expiration,
 	)
 }
 

@@ -5,17 +5,19 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/cosmos/cosmos-sdk/client"
-	"github.com/cosmos/cosmos-sdk/client/flags"
-	"github.com/cosmos/cosmos-sdk/client/input"
-	"github.com/cosmos/cosmos-sdk/crypto/hd"
-	bip39 "github.com/cosmos/go-bip39"
 	"github.com/kyokomi/emoji"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	band "github.com/bandprotocol/chain/v2/app"
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
+	bip39 "github.com/cosmos/go-bip39"
+
+	"github.com/cosmos/cosmos-sdk/client"
+	"github.com/cosmos/cosmos-sdk/client/flags"
+	"github.com/cosmos/cosmos-sdk/client/input"
+	"github.com/cosmos/cosmos-sdk/crypto/hd"
+
+	band "github.com/bandprotocol/chain/v3/app"
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
 const (
@@ -26,22 +28,22 @@ const (
 	flagAddress  = "address"
 )
 
-func keysCmd(c *Context) *cobra.Command {
+func keysCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "keys",
 		Aliases: []string{"k"},
 		Short:   "Manage key held by the oracle process",
 	}
 	cmd.AddCommand(
-		keysAddCmd(c),
-		keysDeleteCmd(c),
-		keysListCmd(c),
-		keysShowCmd(c),
+		keysAddCmd(),
+		keysDeleteCmd(),
+		keysListCmd(),
+		keysShowCmd(),
 	)
 	return cmd
 }
 
-func keysAddCmd(c *Context) *cobra.Command {
+func keysAddCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "add [name]",
 		Aliases: []string{"a"},
@@ -72,9 +74,6 @@ func keysAddCmd(c *Context) *cobra.Command {
 				fmt.Printf("Mnemonic: %s\n", mnemonic)
 			}
 
-			if err != nil {
-				return err
-			}
 			account, err := cmd.Flags().GetUint32(flagAccount)
 			if err != nil {
 				return err
@@ -88,7 +87,13 @@ func keysAddCmd(c *Context) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("Address: %s\n", info.GetAddress().String())
+
+			address, err := info.GetAddress()
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("Address: %s\n", address.String())
 			return nil
 		},
 	}
@@ -98,7 +103,7 @@ func keysAddCmd(c *Context) *cobra.Command {
 	return cmd
 }
 
-func keysDeleteCmd(c *Context) *cobra.Command {
+func keysDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "delete [name]",
 		Aliases: []string{"d"},
@@ -134,7 +139,7 @@ func keysDeleteCmd(c *Context) *cobra.Command {
 	return cmd
 }
 
-func keysListCmd(c *Context) *cobra.Command {
+func keysListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"l"},
@@ -151,13 +156,18 @@ func keysListCmd(c *Context) *cobra.Command {
 			}
 			isShowAddr := viper.GetBool(flagAddress)
 			for _, key := range keys {
+				address, err := key.GetAddress()
+				if err != nil {
+					return err
+				}
+
 				if isShowAddr {
-					fmt.Printf("%s ", key.GetAddress().String())
+					fmt.Printf("%s ", address.String())
 				} else {
 					queryClient := types.NewQueryClient(clientCtx)
 					r, err := queryClient.IsReporter(
 						context.Background(),
-						&types.QueryIsReporterRequest{ValidatorAddress: cfg.Validator, ReporterAddress: key.GetAddress().String()},
+						&types.QueryIsReporterRequest{ValidatorAddress: cfg.Validator, ReporterAddress: address.String()},
 					)
 					s := ":question:"
 					if err == nil {
@@ -167,7 +177,7 @@ func keysListCmd(c *Context) *cobra.Command {
 							s = ":x:"
 						}
 					}
-					emoji.Printf("%s%s => %s\n", s, key.GetName(), key.GetAddress().String())
+					emoji.Printf("%s%s => %s\n", s, key.Name, address.String())
 				}
 			}
 
@@ -175,14 +185,14 @@ func keysListCmd(c *Context) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolP(flagAddress, "a", false, "Output the address only")
-	viper.BindPFlag(flagAddress, cmd.Flags().Lookup(flagAddress))
+	_ = viper.BindPFlag(flagAddress, cmd.Flags().Lookup(flagAddress))
 
 	flags.AddQueryFlagsToCmd(cmd)
 
 	return cmd
 }
 
-func keysShowCmd(c *Context) *cobra.Command {
+func keysShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "show [name]",
 		Aliases: []string{"s"},
@@ -195,7 +205,12 @@ func keysShowCmd(c *Context) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Println(key.GetAddress().String())
+
+			address, err := key.GetAddress()
+			if err != nil {
+				return err
+			}
+			fmt.Println(address.String())
 			return nil
 		},
 	}

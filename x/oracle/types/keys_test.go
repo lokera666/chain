@@ -4,8 +4,9 @@ import (
 	"encoding/hex"
 	"testing"
 
-	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/require"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
 func TestRequestStoreKey(t *testing.T) {
@@ -32,6 +33,11 @@ func TestValidatorStatusStoreKey(t *testing.T) {
 	val, _ := sdk.ValAddressFromHex("b80f2a5df7d5710b15622d1a9f1e3830ded5bda8")
 	expect, _ := hex.DecodeString("05b80f2a5df7d5710b15622d1a9f1e3830ded5bda8")
 	require.Equal(t, expect, ValidatorStatusStoreKey(val))
+}
+
+func TestSigningResultStoreKey(t *testing.T) {
+	expect, _ := hex.DecodeString("070000000000000014")
+	require.Equal(t, expect, SigningResultStoreKey(RequestID(20)))
 }
 
 func TestResultStoreKey(t *testing.T) {

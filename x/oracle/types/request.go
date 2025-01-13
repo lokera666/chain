@@ -21,17 +21,18 @@ type RequestSpec interface {
 	GetPrepareGas() uint64
 	GetExecuteGas() uint64
 	GetFeeLimit() sdk.Coins
+	GetTSSEncoder() Encoder
 }
 
 func NewRawRequest(
-	ExternalID ExternalID,
-	DataSourceID DataSourceID,
-	Calldata []byte,
+	externalID ExternalID,
+	dataSourceID DataSourceID,
+	calldata []byte,
 ) RawRequest {
 	return RawRequest{
-		ExternalID:   ExternalID,
-		DataSourceID: DataSourceID,
-		Calldata:     Calldata,
+		ExternalID:   externalID,
+		DataSourceID: dataSourceID,
+		Calldata:     calldata,
 	}
 }
 
@@ -46,6 +47,9 @@ func NewRequest(
 	rawRequests []RawRequest,
 	ibcChannel *IBCChannel,
 	executeGas uint64,
+	tssEncoder Encoder,
+	requester string,
+	feeLimit sdk.Coins,
 ) Request {
 	requestedVals := make([]string, len(requestedValidators))
 	if requestedValidators != nil {
@@ -66,5 +70,8 @@ func NewRequest(
 		RawRequests:         rawRequests,
 		IBCChannel:          ibcChannel,
 		ExecuteGas:          executeGas,
+		TSSEncoder:          tssEncoder,
+		Requester:           requester,
+		FeeLimit:            feeLimit,
 	}
 }

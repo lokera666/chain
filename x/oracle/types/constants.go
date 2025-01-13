@@ -1,6 +1,5 @@
 package types
 
-// nolint
 const (
 	DoNotModify = "[do-not-modify]"
 
@@ -14,12 +13,7 @@ const (
 	MaxWasmCodeSize         = 512 * 1024      // 512kB
 	MaxCompiledWasmCodeSize = 1 * 1024 * 1024 // 1MB
 
-	MaximumOwasmGas = 8000000 // The same as block gas limit
-
-	MaxConcurentResolvingRequests = 4
+	MaximumOwasmGas = 8000000
 )
 
-// nolint
-var (
-	DoNotModifyBytes = []byte(DoNotModify)
-)
+var DoNotModifyBytes = []byte(DoNotModify)

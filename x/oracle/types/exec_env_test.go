@@ -4,9 +4,11 @@ import (
 	"testing"
 	"time"
 
-	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/require"
-	"github.com/tendermint/tendermint/crypto/secp256k1"
+
+	"github.com/cometbft/cometbft/crypto/secp256k1"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
 
 	"github.com/bandprotocol/go-owasm/api"
 )
@@ -15,12 +17,16 @@ var (
 	pk1               = secp256k1.GenPrivKey().PubKey()
 	pk2               = secp256k1.GenPrivKey().PubKey()
 	pk3               = secp256k1.GenPrivKey().PubKey()
+	pk4               = secp256k1.GenPrivKey().PubKey()
 	addr1             = pk1.Address()
 	addr2             = pk2.Address()
 	addr3             = pk3.Address()
+	addr4             = pk4.Address()
 	validatorAddress1 = sdk.ValAddress(addr1)
 	validatorAddress2 = sdk.ValAddress(addr2)
 	validatorAddress3 = sdk.ValAddress(addr3)
+	accountAddress4   = sdk.AccAddress(addr4)
+	coins1            = sdk.NewCoins(sdk.NewInt64Coin("uband", 1000000))
 )
 
 func mockExecEnv() *ExecuteEnv {
@@ -30,7 +36,7 @@ func mockExecEnv() *ExecuteEnv {
 	minCount := uint64(1)
 	requestHeight := int64(999)
 	requestTime := time.Unix(1581589700, 0)
-	clientID := "beeb"
+	clientID := "test"
 	request := NewRequest(
 		oracleScriptID,
 		calldata,
@@ -42,13 +48,16 @@ func mockExecEnv() *ExecuteEnv {
 		nil,
 		nil,
 		0,
+		0,
+		accountAddress4.String(),
+		coins1,
 	)
 	rawReport1 := NewRawReport(1, 0, []byte("DATA1"))
 	rawReport2 := NewRawReport(2, 1, []byte("DATA2"))
 	rawReport3 := NewRawReport(3, 0, []byte("DATA3"))
 	report1 := NewReport(validatorAddress1, true, []RawReport{rawReport1, rawReport2})
 	report2 := NewReport(validatorAddress2, true, []RawReport{rawReport3})
-	env := NewExecuteEnv(request, []Report{report1, report2}, time.Unix(1581589710, 0))
+	env := NewExecuteEnv(request, []Report{report1, report2}, time.Unix(1581589710, 0), 1024)
 	return env
 }
 
@@ -59,7 +68,7 @@ func mockFreshPrepareEnv() *PrepareEnv {
 	minCount := uint64(1)
 	requestHeight := int64(999)
 	requestTime := time.Unix(1581589700, 0)
-	clientID := "beeb"
+	clientID := "test"
 	request := NewRequest(
 		oracleScriptID,
 		calldata,
@@ -71,16 +80,19 @@ func mockFreshPrepareEnv() *PrepareEnv {
 		nil,
 		nil,
 		0,
+		0,
+		accountAddress4.String(),
+		coins1,
 	)
-	env := NewPrepareEnv(request, int64(DefaultMaxCalldataSize), 3)
+	env := NewPrepareEnv(request, int64(DefaultMaxCalldataSize), 3, 1024)
 	return env
 }
 
 func mockAlreadyPreparedEnv() *PrepareEnv {
 	env := mockFreshPrepareEnv()
-	env.AskExternalData(1, 1, []byte("CALLDATA1"))
-	env.AskExternalData(2, 2, []byte("CALLDATA2"))
-	env.AskExternalData(3, 3, []byte("CALLDATA3"))
+	_ = env.AskExternalData(1, 1, []byte("CALLDATA1"))
+	_ = env.AskExternalData(2, 2, []byte("CALLDATA2"))
+	_ = env.AskExternalData(3, 3, []byte("CALLDATA3"))
 	return env
 }
 
@@ -102,9 +114,11 @@ func TestSetReturnData(t *testing.T) {
 	require.Equal(t, api.ErrWrongPeriodAction, err)
 
 	eenv := mockExecEnv()
-	eenv.SetReturnData(result)
+	err = eenv.SetReturnData(result)
+	require.NoError(t, err)
 	require.Equal(t, result, eenv.Retdata)
 }
+
 func TestGetAskCount(t *testing.T) {
 	// Can call on both environment
 	penv := mockFreshPrepareEnv()
@@ -200,9 +214,12 @@ func TestFailedGetExternalData(t *testing.T) {
 
 func TestAskExternalData(t *testing.T) {
 	env := mockFreshPrepareEnv()
-	env.AskExternalData(1, 1, []byte("CALLDATA1"))
-	env.AskExternalData(42, 2, []byte("CALLDATA2"))
-	env.AskExternalData(3, 4, []byte("CALLDATA3"))
+	err := env.AskExternalData(1, 1, []byte("CALLDATA1"))
+	require.NoError(t, err)
+	err = env.AskExternalData(42, 2, []byte("CALLDATA2"))
+	require.NoError(t, err)
+	err = env.AskExternalData(3, 4, []byte("CALLDATA3"))
+	require.NoError(t, err)
 
 	rawReq := env.GetRawRequests()
 	expectRawReq := []RawRequest{
@@ -220,6 +237,7 @@ func TestAskExternalDataOnTooSmallSpan(t *testing.T) {
 	require.Equal(t, api.ErrSpanTooSmall, err)
 	require.Equal(t, []RawRequest(nil), penv.GetRawRequests())
 }
+
 func TestAskTooManyExternalData(t *testing.T) {
 	penv := mockFreshPrepareEnv()
 

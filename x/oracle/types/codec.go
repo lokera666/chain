@@ -2,22 +2,35 @@ package types
 
 import (
 	"github.com/cosmos/cosmos-sdk/codec"
+	"github.com/cosmos/cosmos-sdk/codec/legacy"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
-	cryptocodec "github.com/cosmos/cosmos-sdk/crypto/codec"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/msgservice"
+
+	tsstypes "github.com/bandprotocol/chain/v3/x/tss/types"
 )
+
+// ModuleCdc references the global x/oracle module codec. Note, the codec
+// should ONLY be used in certain instances of tests and for JSON encoding.
+//
+// The actual codec used for serialization should be provided to x/oracle and
+// defined at the application level.
+var ModuleCdc = codec.NewProtoCodec(codectypes.NewInterfaceRegistry())
 
 // RegisterLegacyAminoCodec registers the necessary x/oracle interfaces and concrete types
 // on the provided LegacyAmino codec. These types are used for Amino JSON serialization.
 func RegisterLegacyAminoCodec(cdc *codec.LegacyAmino) {
-	cdc.RegisterConcrete(&MsgRequestData{}, "oracle/Request", nil)
-	cdc.RegisterConcrete(&MsgReportData{}, "oracle/Report", nil)
-	cdc.RegisterConcrete(&MsgCreateDataSource{}, "oracle/CreateDataSource", nil)
-	cdc.RegisterConcrete(&MsgEditDataSource{}, "oracle/EditDataSource", nil)
-	cdc.RegisterConcrete(&MsgCreateOracleScript{}, "oracle/CreateOracleScript", nil)
-	cdc.RegisterConcrete(&MsgEditOracleScript{}, "oracle/EditOracleScript", nil)
-	cdc.RegisterConcrete(&MsgActivate{}, "oracle/Activate", nil)
+	legacy.RegisterAminoMsg(cdc, &MsgRequestData{}, "oracle/Request")
+	legacy.RegisterAminoMsg(cdc, &MsgReportData{}, "oracle/Report")
+	legacy.RegisterAminoMsg(cdc, &MsgCreateDataSource{}, "oracle/CreateDataSource")
+	legacy.RegisterAminoMsg(cdc, &MsgEditDataSource{}, "oracle/EditDataSource")
+	legacy.RegisterAminoMsg(cdc, &MsgCreateOracleScript{}, "oracle/CreateOracleScript")
+	legacy.RegisterAminoMsg(cdc, &MsgEditOracleScript{}, "oracle/EditOracleScript")
+	legacy.RegisterAminoMsg(cdc, &MsgActivate{}, "oracle/Activate")
+	legacy.RegisterAminoMsg(cdc, &MsgUpdateParams{}, "oracle/UpdateParams")
+
+	cdc.RegisterConcrete(&OracleResultSignatureOrder{}, "oracle/OracleResultSignatureOrder", nil)
+	cdc.RegisterConcrete(Params{}, "oracle/Params", nil)
 }
 
 // RegisterInterfaces register the oracle module interfaces to protobuf Any.
@@ -30,27 +43,13 @@ func RegisterInterfaces(registry codectypes.InterfaceRegistry) {
 		&MsgCreateOracleScript{},
 		&MsgEditOracleScript{},
 		&MsgActivate{},
+		&MsgUpdateParams{},
+	)
+
+	registry.RegisterImplementations(
+		(*tsstypes.Content)(nil),
+		&OracleResultSignatureOrder{},
 	)
 
 	msgservice.RegisterMsgServiceDesc(registry, &_Msg_serviceDesc)
-}
-
-var (
-	amino = codec.NewLegacyAmino()
-
-	// ModuleCdc references the global x/oracle module codec. Note, the codec
-	// should ONLY be used in certain instances of tests and for JSON encoding.
-	//
-	// The actual codec used for serialization should be provided to x/oracle and
-	// defined at the application level.
-	ModuleCdc = codec.NewProtoCodec(codectypes.NewInterfaceRegistry())
-
-	// AminoCdc is a amino codec created to support amino json compatible msgs.
-	AminoCdc = codec.NewAminoCodec(amino)
-)
-
-func init() {
-	RegisterLegacyAminoCodec(amino)
-	cryptocodec.RegisterCrypto(amino)
-	amino.Seal()
 }

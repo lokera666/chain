@@ -4,8 +4,11 @@ import (
 	"encoding/hex"
 	"testing"
 
-	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/require"
+
+	"cosmossdk.io/math"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
 )
 
 func mustDecodeString(hexstr string) []byte {
@@ -23,14 +26,15 @@ func TestGetBytesRequestPacket(t *testing.T) {
 		Calldata:       mustDecodeString("030000004254436400000000000000"),
 		AskCount:       1,
 		MinCount:       1,
-		FeeLimit:       sdk.NewCoins(sdk.NewCoin("uband", sdk.NewInt(10000))),
+		FeeLimit:       sdk.NewCoins(sdk.NewCoin("uband", math.NewInt(10000))),
+		TSSEncoder:     0,
 		PrepareGas:     100,
 		ExecuteGas:     100,
 	}
 	require.Equal(
 		t,
 		[]byte(
-			`{"ask_count":"1","calldata":"AwAAAEJUQ2QAAAAAAAAA","client_id":"test","execute_gas":"100","fee_limit":[{"amount":"10000","denom":"uband"}],"min_count":"1","oracle_script_id":"1","prepare_gas":"100"}`,
+			`{"ask_count":"1","calldata":"AwAAAEJUQ2QAAAAAAAAA","client_id":"test","execute_gas":"100","fee_limit":[{"amount":"10000","denom":"uband"}],"min_count":"1","oracle_script_id":"1","prepare_gas":"100","tss_encoder":"ENCODER_UNSPECIFIED"}`,
 		),
 		req.GetBytes(),
 	)
@@ -46,6 +50,7 @@ func TestGetBytesResponsePacket(t *testing.T) {
 		ResolveStatus: ResolveStatus(1),
 		Result:        mustDecodeString("4bb10e0000000000"),
 	}
+
 	require.Equal(
 		t,
 		[]byte(

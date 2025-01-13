@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"time"
 
-	sdk "github.com/cosmos/cosmos-sdk/types"
-	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
-	clienttypes "github.com/cosmos/ibc-go/v3/modules/core/02-client/types"
-	channeltypes "github.com/cosmos/ibc-go/v3/modules/core/04-channel/types"
-	host "github.com/cosmos/ibc-go/v3/modules/core/24-host"
+	clienttypes "github.com/cosmos/ibc-go/v8/modules/core/02-client/types"
+	host "github.com/cosmos/ibc-go/v8/modules/core/24-host"
 
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
+	errorsmod "cosmossdk.io/errors"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
+
+	bandtsstypes "github.com/bandprotocol/chain/v3/x/bandtss/types"
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
 )
 
 const (
@@ -28,11 +30,16 @@ func (k Keeper) SetResult(ctx sdk.Context, reqID types.RequestID, result types.R
 	ctx.KVStore(k.storeKey).Set(types.ResultStoreKey(reqID), k.cdc.MustMarshal(&result))
 }
 
+// MarshalResult marshal the result
+func (k Keeper) MarshalResult(ctx sdk.Context, result types.Result) ([]byte, error) {
+	return k.cdc.Marshal(&result)
+}
+
 // GetResult returns the result for the given request ID or error if not exists.
 func (k Keeper) GetResult(ctx sdk.Context, id types.RequestID) (types.Result, error) {
 	bz := ctx.KVStore(k.storeKey).Get(types.ResultStoreKey(id))
 	if bz == nil {
-		return types.Result{}, sdkerrors.Wrapf(types.ErrResultNotFound, "id: %d", id)
+		return types.Result{}, types.ErrResultNotFound.Wrapf("id: %d", id)
 	}
 	var result types.Result
 	k.cdc.MustUnmarshal(bz, &result)
@@ -49,15 +56,108 @@ func (k Keeper) MustGetResult(ctx sdk.Context, id types.RequestID) types.Result 
 }
 
 // ResolveSuccess resolves the given request as success with the given result.
-func (k Keeper) ResolveSuccess(ctx sdk.Context, id types.RequestID, result []byte, gasUsed uint32) {
+func (k Keeper) ResolveSuccess(
+	ctx sdk.Context,
+	id types.RequestID,
+	requester string,
+	feeLimit sdk.Coins,
+	result []byte,
+	gasUsed uint64,
+	encoder types.Encoder,
+) {
 	k.SaveResult(ctx, id, types.RESOLVE_STATUS_SUCCESS, result)
-	ctx.EventManager().EmitEvent(sdk.NewEvent(
+
+	event := sdk.NewEvent(
 		types.EventTypeResolve,
 		sdk.NewAttribute(types.AttributeKeyID, fmt.Sprintf("%d", id)),
 		sdk.NewAttribute(types.AttributeKeyResolveStatus, fmt.Sprintf("%d", types.RESOLVE_STATUS_SUCCESS)),
 		sdk.NewAttribute(types.AttributeKeyResult, hex.EncodeToString(result)),
 		sdk.NewAttribute(types.AttributeKeyGasUsed, fmt.Sprintf("%d", gasUsed)),
+	)
+
+	// Doesn't require signature from bandtss module; emit an event and end process here
+	if encoder == types.ENCODER_UNSPECIFIED {
+		ctx.EventManager().EmitEvent(event)
+		return
+	}
+
+	signingID, err := k.safeCreateSigning(ctx, id, requester, feeLimit, encoder)
+	if err != nil {
+		k.handleCreateSigningFailed(ctx, id, event, err)
+		return
+	}
+
+	// save signing result and emit an event.
+	signingResult := &types.SigningResult{
+		SigningID: signingID,
+	}
+	k.SetSigningResult(ctx, id, *signingResult)
+
+	event = event.AppendAttributes(
+		sdk.NewAttribute(types.AttributeKeySigningID, fmt.Sprintf("%d", signingID)),
+	)
+	ctx.EventManager().EmitEvent(event)
+}
+
+// safeCreateSigning creates a signing request for the given request ID.
+func (k Keeper) safeCreateSigning(
+	ctx sdk.Context,
+	id types.RequestID,
+	requester string,
+	feeLimit sdk.Coins,
+	encoder types.Encoder,
+) (signingID bandtsstypes.SigningID, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			ctx.Logger().Error(fmt.Sprintf("Panic recovered: %v", r))
+			err = types.ErrCreateSigningPanic
+		}
+	}()
+
+	cacheCtx, writeFn := ctx.CacheContext()
+	signingID, err = k.bandtssKeeper.CreateDirectSigningRequest(
+		cacheCtx,
+		types.NewOracleResultSignatureOrder(id, encoder),
+		"",
+		sdk.MustAccAddressFromBech32(requester),
+		feeLimit,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	writeFn()
+
+	return signingID, nil
+}
+
+// handleCreateSigningFailed handles the failure of creating a signing request by sett.
+func (k Keeper) handleCreateSigningFailed(
+	ctx sdk.Context,
+	id types.RequestID,
+	existingEvents sdk.Event,
+	err error,
+) {
+	codespace, code, _ := errorsmod.ABCIInfo(err, false)
+	signingResult := &types.SigningResult{
+		ErrorCodespace: codespace,
+		ErrorCode:      uint64(code),
+	}
+
+	k.SetSigningResult(ctx, id, *signingResult)
+
+	ctx.EventManager().EmitEvent(sdk.NewEvent(
+		types.EventTypeHandleRequestSignFail,
+		sdk.NewAttribute(types.AttributeKeyID, fmt.Sprintf("%d", id)),
+		sdk.NewAttribute(types.AttributeKeyReason, err.Error()),
 	))
+
+	existingEvents = existingEvents.AppendAttributes(
+		sdk.NewAttribute(types.AttributeKeySigningErrCodespace, signingResult.ErrorCodespace),
+		sdk.NewAttribute(types.AttributeKeySigningErrCode, fmt.Sprintf("%d", signingResult.ErrorCode)),
+	)
+
+	ctx.EventManager().EmitEvent(existingEvents)
 }
 
 // ResolveFailure resolves the given request as failure with the given reason.
@@ -95,7 +195,7 @@ func (k Keeper) SaveResult(
 		r.MinCount,                         // MinCount
 		id,                                 // RequestID
 		reportCount,                        // AnsCount
-		int64(r.RequestTime),               // RequestTime
+		r.RequestTime,                      // RequestTime
 		ctx.BlockTime().Unix(),             // ResolveTime
 		status,                             // ResolveStatus
 		result,                             // Result
@@ -104,36 +204,7 @@ func (k Keeper) SaveResult(
 	if r.IBCChannel != nil {
 		sourceChannel := r.IBCChannel.ChannelId
 		sourcePort := r.IBCChannel.PortId
-		sourceChannelEnd, found := k.channelKeeper.GetChannel(ctx, sourcePort, sourceChannel)
-		if !found {
-			ctx.EventManager().EmitEvent(sdk.NewEvent(
-				types.EventTypeSendPacketFail,
-				sdk.NewAttribute(
-					types.AttributeKeyReason,
-					fmt.Sprintf("Cannot find channel on port ID (%s) channel ID (%s)", sourcePort, sourceChannel),
-				),
-			))
-			return
-		}
-		destinationPort := sourceChannelEnd.Counterparty.PortId
-		destinationChannel := sourceChannelEnd.Counterparty.ChannelId
-		sequence, found := k.channelKeeper.GetNextSequenceSend(
-			ctx, sourcePort, sourceChannel,
-		)
-		if !found {
-			ctx.EventManager().EmitEvent(sdk.NewEvent(
-				types.EventTypeSendPacketFail,
-				sdk.NewAttribute(
-					types.AttributeKeyReason,
-					fmt.Sprintf(
-						"Cannot get sequence number on source port: %s, source channel: %s",
-						sourcePort,
-						sourceChannel,
-					),
-				),
-			))
-			return
-		}
+
 		channelCap, ok := k.scopedKeeper.GetCapability(ctx, host.ChannelCapabilityPath(sourcePort, sourceChannel))
 		if !ok {
 			ctx.EventManager().EmitEvent(sdk.NewEvent(
@@ -144,21 +215,18 @@ func (k Keeper) SaveResult(
 		}
 
 		packetData := types.NewOracleResponsePacketData(
-			r.ClientID, id, reportCount, int64(r.RequestTime), ctx.BlockTime().Unix(), status, result,
+			r.ClientID, id, reportCount, r.RequestTime, ctx.BlockTime().Unix(), status, result,
 		)
 
-		packet := channeltypes.NewPacket(
-			packetData.GetBytes(),
-			sequence,
+		if _, err := k.ics4Wrapper.SendPacket(
+			ctx,
+			channelCap,
 			sourcePort,
 			sourceChannel,
-			destinationPort,
-			destinationChannel,
 			clienttypes.NewHeight(0, 0),
 			uint64(ctx.BlockTime().UnixNano()+packetExpireTime),
-		)
-
-		if err := k.channelKeeper.SendPacket(ctx, channelCap, packet); err != nil {
+			packetData.GetBytes(),
+		); err != nil {
 			ctx.EventManager().EmitEvent(sdk.NewEvent(
 				types.EventTypeSendPacketFail,
 				sdk.NewAttribute(types.AttributeKeyReason, fmt.Sprintf("Unable to send packet: %s", err)),

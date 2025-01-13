@@ -1,17 +1,18 @@
 package yoda
 
 import (
-	"sync"
 	"sync/atomic"
 	"time"
 
+	rpcclient "github.com/cometbft/cometbft/rpc/client"
+
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	sdk "github.com/cosmos/cosmos-sdk/types"
-	rpcclient "github.com/tendermint/tendermint/rpc/client"
 
-	"github.com/bandprotocol/chain/v2/pkg/filecache"
-	"github.com/bandprotocol/chain/v2/x/oracle/types"
-	"github.com/bandprotocol/chain/v2/yoda/executor"
+	band "github.com/bandprotocol/chain/v3/app"
+	"github.com/bandprotocol/chain/v3/pkg/filecache"
+	"github.com/bandprotocol/chain/v3/x/oracle/types"
+	"github.com/bandprotocol/chain/v3/yoda/executor"
 )
 
 type FeeEstimationData struct {
@@ -30,10 +31,11 @@ type ReportMsgWithKey struct {
 }
 
 type Context struct {
+	bandApp          *band.BandApp
 	client           rpcclient.Client
 	validator        sdk.ValAddress
 	gasPrices        string
-	keys             []keyring.Info
+	keys             []*keyring.Record
 	executor         executor.Executor
 	fileCache        filecache.Cache
 	broadcastTimeout time.Duration
@@ -45,7 +47,6 @@ type Context struct {
 	freeKeys           chan int64
 	keyRoundRobinIndex int64 // Must use in conjunction with sync/atomic
 
-	dataSourceCache *sync.Map
 	pendingRequests map[types.RequestID]bool
 
 	metricsEnabled bool
